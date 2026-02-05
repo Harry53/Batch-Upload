@@ -13,6 +13,7 @@ from flask_login import LoginManager, UserMixin, login_user, login_required, log
 from flask_bcrypt import Bcrypt
 from flask_apscheduler import APScheduler
 from sqlalchemy import text, inspect
+from sqlalchemy.exc import IntegrityError
 import time
 
 # ==========================================
@@ -279,8 +280,8 @@ DASHBOARD_PAGE = """
     <tbody>{% for j in history %}<tr><td>{{ j.ticket_id }}</td><td>{{ j.batch_type }}</td><td>{{ j.batch_number }}</td>
     <td><span class="badge {{ 'bg-success' if j.status=='Completed' else 'bg-danger' if j.status=='Failed' else 'bg-warning' if j.status=='Scheduled' else 'bg-secondary' }}">{{ j.status }}</span></td>
     <td>{{ j.start_time.strftime('%d-%m-%Y %H:%M') if j.start_time else '-' }}</td>
-	<td>{{ h.scheduled_time.strftime('%d-%m-%Y %H:%M') if h.scheduled_time else '-' }}</td>
-	<td>{{ h.completion_time.strftime('%%d-%m-%Y %H:%M') if h.completion_time else '-' }}</td>
+    <td>{{ j.scheduled_time.strftime('%d-%m-%Y %H:%M') if j.scheduled_time else '-' }}</td>
+	<td>{{ j.completion_time.strftime('%d-%m-%Y %H:%M') if j.completion_time else '-' }}</td>
     <td>
         {% if j.status in ['Running', 'Scheduled'] %}
         <a href="{{ url_for('cancel_job', j_id=j.id) }}" class="btn btn-xs btn-danger" onclick="return confirm('Are you sure you want to cancel this job?')">Cancel</a>
@@ -336,7 +337,7 @@ EXECUTION_PAGE = """
             <div class="col-6"><label>Batch #</label><input name="b_no" class="form-control" required><span class="help-text">Unique Batch Number</span></div>
             <div class="col-12"><label>Source Path</label>
                 <input name="src_path" class="form-control" value="/mnt/CSS-LLH" placeholder="/mnt/CSS-LLH">
-                <span class="help-text">NAS Share Path: \\192.168.0.150\syndicationmaster</span>
+                <span class="help-text">NAS Share Path: \\\\192.168.0.150\\syndicationmaster</span>
             </div>
             <div class="col-12"><label>Destination Path</label>
                 <input name="dst_path" class="form-control" value="s3://amagicloud-samsungin/Media/S3/INSONO1/LL/Movies_Club_LLH" placeholder="s3://amagicloud-samsungin/Media/S3/INSONO1/LL/Movies_Club_LLH">
@@ -436,11 +437,13 @@ ADMIN_TOOLS_PAGE = """
     </form>
 </div>
 <div class="card-body p-0 table-responsive-scroll">
-<table class="table table-sm mb-0"><thead><tr><th>Ticket</th><th>Batch #</th><th>Type</th><th>Status</th><th>Start</th><th>Action</th><th>Log</th></tr></thead>
+<table class="table table-sm mb-0"><thead><tr><th>Ticket</th><th>Batch #</th><th>Type</th><th>Status</th><th>Start</th><th>Schedule</th><th>Completion</th><th>Action</th><th>Log</th></tr></thead>
 <tbody>{% for h in history %}<tr>
     <td>{{ h.ticket_id }}</td><td>{{ h.batch_number }}</td><td>{{ h.batch_type }}</td>
     <td><span class="badge {{ 'bg-success' if h.status=='Completed' else 'bg-danger' if h.status=='Failed' else 'bg-warning' if h.status=='Scheduled' else 'bg-secondary' }}">{{ h.status }}</span></td>
     <td>{{ h.start_time.strftime('%Y-%m-%d %H:%M') if h.start_time else '-' }}</td>
+    <td>{{ h.scheduled_time.strftime('%Y-%m-%d %H:%M') if h.scheduled_time else '-' }}</td>
+    <td>{{ h.completion_time.strftime('%Y-%m-%d %H:%M') if h.completion_time else '-' }}</td>
     <td>{% if h.status in ['Running', 'Scheduled'] %}<a href="{{ url_for('cancel_job', j_id=h.id) }}" class="btn btn-xs btn-danger">Cancel</a>{% else %}-{% endif %}</td>
     <td><a href="{{ url_for('view_job_log', j_id=h.id) }}" target="_blank" class="btn btn-xs btn-outline-primary">Log</a></td>
 </tr>{% endfor %}</tbody>
@@ -457,6 +460,13 @@ ADMIN_TOOLS_PAGE = """
 <div class="card-body p-0 table-responsive-scroll"><table class="table table-sm mb-0"><thead class="table-light"><tr><th>User</th><th>Action</th><th>Time</th></tr></thead>
 <tbody>{% for a in activities %}<tr><td>{{ a.username }}</td><td>{{ a.action }}</td>
 <td>{{ a.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td></tr>{% endfor %}</tbody></table></div></div>
+
+<div class="card"><div class="card-header"><b>Web Log (Latest 200 lines)</b>
+    <small class="text-muted d-block">Path: /var/www/html/batch-web/logs/web.log</small>
+</div>
+<div class="card-body">
+    <pre class="bg-light p-2 small border" style="max-height:260px; overflow:auto; white-space:pre-wrap;">{{ web_log_tail }}</pre>
+</div></div>
 {% endblock %}
 """
 
@@ -471,7 +481,7 @@ USER_MGMT_PAGE = """
     <div class="col-auto"><button class="btn btn-sm btn-success">Create User</button></div>
 </form></div></div>
 <div class="card"><div class="card-header"><b>Active User Management</b></div><div class="card-body p-0 table-responsive-scroll">
-<table class="table table-sm mb-0"><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last IP/Host</th><th>Disabled</th><th>Actions</th></tr></thead>
+<table class="table table-sm mb-0"><thead><tr><th>User</th><th>Role</th><th>Status</th><th>Last IP/Host</th><th>Disabled</th><th>Last Login</th><th>Actions</th></tr></thead>
 <tbody>{% for u in users %}<tr>
     <td>{{ u.username }}</td><td>{{ u.role }}</td>
     <td><span class="badge {{ 'bg-success' if u.is_online else 'bg-secondary' }}">{{ 'Online' if u.is_online else 'Offline' }}</span></td>
@@ -502,7 +512,7 @@ def render_page(t_str, **kwargs):
 @app.route('/log-click', methods=['POST'])
 @login_required
 def log_click_event():
-    data = request.json
+    data = request.get_json(silent=True) or {}
     elem = data.get('element', 'Unknown')
     url = data.get('url', '')
     with open(WEB_LOG, "a") as f:
@@ -621,8 +631,16 @@ def admin_tools():
     backups = [f for f in os.listdir(BACKUP_DIR) if f.endswith('.db')]
     backup_file = max(backups, key=lambda x: os.path.getctime(os.path.join(BACKUP_DIR, x))) if backups else None
 
+    web_log_tail = ""
+    try:
+        with open(WEB_LOG, 'r') as f:
+            web_log_tail = ''.join(f.readlines()[-200:])
+    except Exception as e:
+        web_log_tail = f"Unable to read web log: {e}"
+
     return render_page(ADMIN_TOOLS_PAGE, history=history, activities=activities,
-                       backup_file=backup_file, audit_s3=s3_list, audit_nas=nas_list, s3_links=s3_links_result)
+                       backup_file=backup_file, audit_s3=s3_list, audit_nas=nas_list,
+                       s3_links=s3_links_result, web_log_tail=web_log_tail)
 
 @app.route('/archive-data', methods=['POST'])
 @login_required
@@ -855,17 +873,22 @@ def user_mgmt():
 @login_required
 @role_required(['Admin'])
 def create_user():
+    username = request.form['username'].strip()
     hashed = bcrypt.generate_password_hash(request.form['password']).decode('utf-8')
-    db.session.add(User(username=request.form['username'], password=hashed, role=request.form['role']))
-    db.session.commit()
-    flash("User created successfully", "success")
+    db.session.add(User(username=username, password=hashed, role=request.form['role']))
+    try:
+        db.session.commit()
+        flash("User created successfully", "success")
+    except IntegrityError:
+        db.session.rollback()
+        flash(f"Username '{username}' already exists", "danger")
     return redirect(url_for('user_mgmt'))
 
 @app.route('/user/update', methods=['POST'])
 @login_required
 @role_required(['Admin'])
 def update_user():
-    u = db.session.get(User, request.form['u_id'])
+    u = db.session.get(User, int(request.form['u_id']))
     if not u: return redirect(url_for('user_mgmt'))
     u.role = request.form['new_role']
     if request.form.get('new_pass'):
