@@ -6,6 +6,8 @@ import json
 import socket
 import signal
 import shutil
+import tempfile
+import re
 from functools import wraps
 from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify
 from flask_sqlalchemy import SQLAlchemy
@@ -74,6 +76,8 @@ class BatchJob(db.Model):
     pid = db.Column(db.Integer, nullable=True)               # New: To kill process
     source_path = db.Column(db.String(300), nullable=True)   # New: For LLH/S3
     dest_path = db.Column(db.String(300), nullable=True)     # New: For LLH/S3
+    vendor_name = db.Column(db.String(120), nullable=True)   # New: Universal transfer vendor
+    aws_profile = db.Column(db.String(120), nullable=True)   # New: AWS profile used for transfer
 
 class UserActivity(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -89,6 +93,18 @@ class ArchiveData(db.Model):
     # Storing data as JSON strings to keep main DB light
     job_data = db.Column(db.Text)
     activity_data = db.Column(db.Text)
+
+class AwsCredential(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    vendor_name = db.Column(db.String(120), unique=True, nullable=False)
+    aws_profile = db.Column(db.String(120), nullable=False)
+    access_key = db.Column(db.String(200), nullable=True)
+    secret_key = db.Column(db.String(200), nullable=True)
+    region = db.Column(db.String(50), nullable=True)
+    notes = db.Column(db.String(255), nullable=True)
+    is_active = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.datetime.now, onupdate=datetime.datetime.now)
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -162,6 +178,73 @@ def create_s3_links_from_batch_files(batch_number, batch_type):
         except: pass
     return "; ".join(links) if links else ""
 
+def _parse_unc_path(path):
+    clean = path.strip().replace("/", "\\")
+    clean = clean.lstrip("\\")
+    parts = [p for p in clean.split("\\") if p]
+    if len(parts) < 2:
+        return None, None
+    server, share = parts[0], parts[1]
+    subdir = "/".join(parts[2:]) if len(parts) > 2 else ""
+    return f"//{server}/{share}", subdir
+
+def mount_nas_path(path, writable=False):
+    mount_dir = tempfile.mkdtemp(prefix="nas_mount_")
+    if path.startswith("\\\\"):
+        remote, subdir = _parse_unc_path(path)
+        if not remote:
+            raise RuntimeError("Invalid UNC path format. Expected \\\\server\\share\\folder")
+        mount_opts = "rw,guest" if writable else "ro,guest"
+        mount_cmd = ["/bin/mount", "-t", "cifs", remote, mount_dir, "-o", mount_opts]
+        mount_proc = subprocess.run(mount_cmd, capture_output=True, text=True)
+        if mount_proc.returncode != 0:
+            shutil.rmtree(mount_dir, ignore_errors=True)
+            raise RuntimeError(f"NAS mount failed: {mount_proc.stderr or mount_proc.stdout}")
+        target = os.path.join(mount_dir, subdir) if subdir else mount_dir
+        return mount_dir, target
+    return None, path
+
+def unmount_nas_path(mount_dir):
+    if mount_dir and os.path.exists(mount_dir):
+        subprocess.run(["/bin/umount", mount_dir], capture_output=True, text=True)
+        shutil.rmtree(mount_dir, ignore_errors=True)
+
+def verify_nas_path(path):
+    mount_dir = None
+    try:
+        mount_dir, target = mount_nas_path(path, writable=False)
+        list_cmd = ["/bin/ls", "-la", target]
+        out = subprocess.run(list_cmd, capture_output=True, text=True)
+        success = out.returncode == 0
+        msg = out.stdout if success else (out.stderr or out.stdout)
+        return success, f"NAS check {'passed' if success else 'failed'}\n{msg}"
+    except Exception as e:
+        return False, f"NAS verify error: {e}"
+    finally:
+        unmount_nas_path(mount_dir)
+
+def verify_s3_access(s3_path, aws_profile):
+    if not s3_path.lower().startswith("s3://"):
+        return False, "S3 path must start with s3://"
+    list_cmd = ["/usr/local/bin/aws", "s3", "ls", s3_path, "--profile", aws_profile]
+    list_proc = subprocess.run(list_cmd, capture_output=True, text=True)
+    temp_file = tempfile.NamedTemporaryFile(mode="w", delete=False)
+    temp_file.write(f"verify {datetime.datetime.now()}\n")
+    temp_file.close()
+    verify_key = f"{s3_path.rstrip('/')}/.verify_{int(time.time())}.txt"
+    cp_cmd = ["/usr/local/bin/aws", "s3", "cp", temp_file.name, verify_key, "--profile", aws_profile]
+    rm_cmd = ["/usr/local/bin/aws", "s3", "rm", verify_key, "--profile", aws_profile]
+    cp_proc = subprocess.run(cp_cmd, capture_output=True, text=True)
+    rm_proc = subprocess.run(rm_cmd, capture_output=True, text=True)
+    os.unlink(temp_file.name)
+    success = list_proc.returncode == 0 and cp_proc.returncode == 0 and rm_proc.returncode == 0
+    logs = [
+        f"LIST: {(list_proc.stdout or list_proc.stderr).strip()}",
+        f"UPLOAD TEST: {(cp_proc.stdout or cp_proc.stderr).strip()}",
+        f"CLEANUP TEST: {(rm_proc.stdout or rm_proc.stderr).strip()}",
+    ]
+    return success, "\n".join(logs)
+
 def run_script_task(job_id, cmd, log_file):
     with app.app_context():
         job = db.session.get(BatchJob, job_id)
@@ -171,15 +254,12 @@ def run_script_task(job_id, cmd, log_file):
         try:
             with open(log_file, "a") as f:
                 f.write(f"\n--- EXECUTION START: {datetime.datetime.now()} ---\n")
-                # Store PID to allow cancellation
                 proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
                 job.pid = proc.pid
                 db.session.commit()
-
-                for line in proc.stdout: f.write(line)
+                for line in proc.stdout:
+                    f.write(line)
                 proc.wait()
-
-            # Refresh job from DB in case it was cancelled externally
             db.session.refresh(job)
             if job.status != 'Cancelled':
                 job.status = 'Completed' if proc.returncode == 0 else 'Failed'
@@ -189,8 +269,54 @@ def run_script_task(job_id, cmd, log_file):
         except Exception as e:
             job.status = 'Failed'
             job.completion_time = datetime.datetime.now()
-            with open(log_file, "a") as f: f.write(f"CRITICAL ERROR: {str(e)}")
+            with open(log_file, "a") as f:
+                f.write(f"CRITICAL ERROR: {str(e)}")
         db.session.commit()
+
+def run_universal_transfer_task(job_id, mode, nas_path, s3_path, aws_profile, log_file):
+    mount_dir = None
+    with app.app_context():
+        job = db.session.get(BatchJob, job_id)
+        job.status = 'Running'
+        job.start_time = datetime.datetime.now()
+        db.session.commit()
+        try:
+            with open(log_file, "a") as f:
+                f.write(f"\n--- UNIVERSAL {mode.upper()} START: {datetime.datetime.now()} ---\n")
+                nas_ok, nas_msg = verify_nas_path(nas_path)
+                s3_ok, s3_msg = verify_s3_access(s3_path, aws_profile)
+                f.write(f"[VERIFY NAS]\n{nas_msg}\n")
+                f.write(f"[VERIFY S3]\n{s3_msg}\n")
+                if not nas_ok or not s3_ok:
+                    raise RuntimeError("Verification failed. Cannot proceed with transfer.")
+
+                mount_dir, mounted_target = mount_nas_path(nas_path, writable=(mode == "download"))
+                if mode == "upload":
+                    cmd = ["/usr/local/bin/aws", "s3", "sync", mounted_target, s3_path, "--profile", aws_profile]
+                else:
+                    cmd = ["/usr/local/bin/aws", "s3", "sync", s3_path, mounted_target, "--profile", aws_profile]
+
+                f.write(f"[COMMAND] {' '.join(cmd)}\n")
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                job.pid = proc.pid
+                db.session.commit()
+                for line in proc.stdout:
+                    f.write(line)
+                proc.wait()
+                db.session.refresh(job)
+                if job.status != 'Cancelled':
+                    job.status = 'Completed' if proc.returncode == 0 else 'Failed'
+                    job.completion_time = datetime.datetime.now()
+            log_activity(f"Universal transfer finished: ticket={job.ticket_id}, mode={mode}, status={job.status}")
+        except Exception as e:
+            job.status = 'Failed'
+            job.completion_time = datetime.datetime.now()
+            with open(log_file, "a") as f:
+                f.write(f"\nCRITICAL ERROR: {str(e)}\n")
+            log_activity(f"Universal transfer failed: ticket={job.ticket_id}, mode={mode}, error={e}")
+        finally:
+            unmount_nas_path(mount_dir)
+            db.session.commit()
 
 # ==========================================
 # UI TEMPLATES
@@ -370,8 +496,45 @@ EXECUTION_PAGE = """
             <div class="col-6"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com,haraprasad.mishra@shemaroo.com" required></div>
             <button class="btn btn-dark btn-sm mt-3 w-100">Run Upload</button>
         </div></form></div></div>
+        <div class="card"><div class="card-header"><b>Universal Upload (NAS ➜ S3)</b></div><div class="card-body">
+        <form method="post"><input type="hidden" name="panel" value="universal_upload"><div class="row g-2">
+            <div class="col-6"><label>Ticket ID</label><input class="form-control" value="{{ ids.UA }}" readonly></div>
+            <div class="col-6"><label>Vendor</label><select name="vendor_id" class="form-select" required>{% for v in aws_credentials %}<option value="{{ v.id }}">{{ v.vendor_name }} ({{ v.aws_profile }})</option>{% endfor %}</select></div>
+            <div class="col-9"><label>NAS Source (UNC)</label><input name="nas_path" class="form-control" placeholder="\\\\192.168.0.150\\Syndication-Master\\Apr-2026" required></div>
+            <div class="col-3 d-flex align-items-end"><button type="button" class="btn btn-outline-info btn-sm w-100" onclick="verifyNas(this.form.nas_path.value)">Verify Source</button></div>
+            <div class="col-9"><label>S3 Destination</label><input name="s3_path" class="form-control" placeholder="s3://insget-world/Apr-2027" required></div>
+            <div class="col-3 d-flex align-items-end"><button type="button" class="btn btn-outline-info btn-sm w-100" onclick="verifyS3(this.form.s3_path.value, this.form.vendor_id.value)">Verify Dest</button></div>
+            <div class="col-6"><label>Schedule</label><input type="datetime-local" name="sched" class="form-control"></div>
+            <div class="col-6"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com" required></div>
+            <button class="btn btn-primary btn-sm mt-3 w-100">Run Universal Upload</button>
+        </div></form></div></div>
+
+        <div class="card"><div class="card-header"><b>Universal Download (S3 ➜ NAS)</b></div><div class="card-body">
+        <form method="post"><input type="hidden" name="panel" value="universal_download"><div class="row g-2">
+            <div class="col-6"><label>Ticket ID</label><input class="form-control" value="{{ ids.UD }}" readonly></div>
+            <div class="col-6"><label>Vendor</label><select name="vendor_id" class="form-select" required>{% for v in aws_credentials %}<option value="{{ v.id }}">{{ v.vendor_name }} ({{ v.aws_profile }})</option>{% endfor %}</select></div>
+            <div class="col-9"><label>S3 Source</label><input name="s3_path" class="form-control" placeholder="s3://insget-world/Apr-2027" required></div>
+            <div class="col-3 d-flex align-items-end"><button type="button" class="btn btn-outline-info btn-sm w-100" onclick="verifyS3(this.form.s3_path.value, this.form.vendor_id.value)">Verify Source</button></div>
+            <div class="col-9"><label>NAS Destination (UNC)</label><input name="nas_path" class="form-control" placeholder="\\\\192.168.0.150\\Syndication-Master\\Apr-2026" required></div>
+            <div class="col-3 d-flex align-items-end"><button type="button" class="btn btn-outline-info btn-sm w-100" onclick="verifyNas(this.form.nas_path.value)">Verify Dest</button></div>
+            <div class="col-6"><label>Schedule</label><input type="datetime-local" name="sched" class="form-control"></div>
+            <div class="col-6"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com" required></div>
+            <button class="btn btn-warning btn-sm mt-3 w-100">Run Universal Download</button>
+        </div></form></div></div>
     </div>
 </div>
+<script>
+async function verifyNas(path) {
+    const r = await fetch("{{ url_for('verify_nas_route') }}", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({nas_path: path})});
+    const d = await r.json();
+    alert((d.success ? "SUCCESS\n" : "FAILED\n") + d.message);
+}
+async function verifyS3(path, vendorId) {
+    const r = await fetch("{{ url_for('verify_s3_route') }}", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({s3_path: path, vendor_id: vendorId})});
+    const d = await r.json();
+    alert((d.success ? "SUCCESS\n" : "FAILED\n") + d.message);
+}
+</script>
 {% endblock %}
 """
 
@@ -379,6 +542,35 @@ ADMIN_TOOLS_PAGE = """
 {% extends "base" %}
 {% block content %}
 <div class="row">
+    <div class="col-md-12 mb-3"><div class="card border-info"><div class="card-header bg-info text-white"><b>AWS Credential List</b></div><div class="card-body">
+    <form method="post" class="row g-2 mb-3">
+        <input type="hidden" name="cred_action" value="create">
+        <div class="col-md-2"><input name="vendor_name" class="form-control form-control-sm" placeholder="Vendor Name" required></div>
+        <div class="col-md-2"><input name="aws_profile" class="form-control form-control-sm" placeholder="AWS Profile" required></div>
+        <div class="col-md-2"><input name="access_key" class="form-control form-control-sm" placeholder="Access Key"></div>
+        <div class="col-md-2"><input name="secret_key" class="form-control form-control-sm" placeholder="Secret Key"></div>
+        <div class="col-md-2"><input name="region" class="form-control form-control-sm" placeholder="Region"></div>
+        <div class="col-md-1"><input name="notes" class="form-control form-control-sm" placeholder="Notes"></div>
+        <div class="col-md-1"><button class="btn btn-sm btn-primary w-100">Add</button></div>
+    </form>
+    <div class="table-responsive-scroll" style="max-height:220px;">
+        <table class="table table-sm"><thead><tr><th>Vendor</th><th>Profile</th><th>Access Key</th><th>Secret Key</th><th>Region</th><th>Notes</th><th>Active</th><th>Actions</th></tr></thead>
+        <tbody>{% for cred in aws_credentials %}<tr>
+            <form method="post">
+                <input type="hidden" name="cred_action" value="update">
+                <input type="hidden" name="cred_id" value="{{ cred.id }}">
+                <td><input name="vendor_name" class="form-control form-control-sm" value="{{ cred.vendor_name }}"></td>
+                <td><input name="aws_profile" class="form-control form-control-sm" value="{{ cred.aws_profile }}"></td>
+                <td><input name="access_key" class="form-control form-control-sm" value="{{ cred.access_key or '' }}"></td>
+                <td><input name="secret_key" class="form-control form-control-sm" value="{{ cred.secret_key or '' }}"></td>
+                <td><input name="region" class="form-control form-control-sm" value="{{ cred.region or '' }}"></td>
+                <td><input name="notes" class="form-control form-control-sm" value="{{ cred.notes or '' }}"></td>
+                <td><input type="checkbox" name="is_active" {{ 'checked' if cred.is_active }}></td>
+                <td><button class="btn btn-xs btn-success">Save</button></td>
+            </form>
+        </tr>{% endfor %}</tbody></table>
+    </div>
+    </div></div></div>
     <div class="col-md-12 mb-3"><div class="card border-primary"><div class="card-header bg-primary text-white"><b>Data Archival</b></div><div class="card-body">
     <form method="post" action="{{ url_for('archive_data_route') }}" class="row align-items-center">
         <div class="col-md-2"><label>Archive Period:</label></div>
@@ -589,7 +781,38 @@ def dashboard():
 def admin_tools():
     s3_list, nas_list, s3_links_result = "", "", ""
     if request.method == 'POST':
-        if 'audit_action' in request.form:
+        if request.form.get('cred_action') == 'create':
+            cred = AwsCredential(
+                vendor_name=request.form['vendor_name'].strip(),
+                aws_profile=request.form['aws_profile'].strip(),
+                access_key=request.form.get('access_key', '').strip() or None,
+                secret_key=request.form.get('secret_key', '').strip() or None,
+                region=request.form.get('region', '').strip() or None,
+                notes=request.form.get('notes', '').strip() or None,
+                is_active=True,
+            )
+            db.session.add(cred)
+            try:
+                db.session.commit()
+                log_activity(f"Created AWS credential vendor={cred.vendor_name}, profile={cred.aws_profile}")
+                flash("AWS credential created", "success")
+            except IntegrityError:
+                db.session.rollback()
+                flash("Vendor name already exists", "danger")
+        elif request.form.get('cred_action') == 'update':
+            cred = db.session.get(AwsCredential, int(request.form['cred_id']))
+            if cred:
+                cred.vendor_name = request.form['vendor_name'].strip()
+                cred.aws_profile = request.form['aws_profile'].strip()
+                cred.access_key = request.form.get('access_key', '').strip() or None
+                cred.secret_key = request.form.get('secret_key', '').strip() or None
+                cred.region = request.form.get('region', '').strip() or None
+                cred.notes = request.form.get('notes', '').strip() or None
+                cred.is_active = bool(request.form.get('is_active'))
+                db.session.commit()
+                log_activity(f"Updated AWS credential vendor={cred.vendor_name}, profile={cred.aws_profile}")
+                flash("AWS credential updated", "success")
+        elif 'audit_action' in request.form:
             b = request.form['check_batch']
             audit_type = request.form.get('audit_type', 'studio')
             paths = {
@@ -638,9 +861,11 @@ def admin_tools():
     except Exception as e:
         web_log_tail = f"Unable to read web log: {e}"
 
+    aws_credentials = AwsCredential.query.order_by(AwsCredential.vendor_name).all()
     return render_page(ADMIN_TOOLS_PAGE, history=history, activities=activities,
                        backup_file=backup_file, audit_s3=s3_list, audit_nas=nas_list,
-                       s3_links=s3_links_result, web_log_tail=web_log_tail)
+                       s3_links=s3_links_result, web_log_tail=web_log_tail,
+                       aws_credentials=aws_credentials)
 
 @app.route('/archive-data', methods=['POST'])
 @login_required
@@ -705,6 +930,28 @@ def archive_data_route():
     log_activity(f"Ran Data Archival ({period})")
     return redirect(url_for('admin_tools'))
 
+@app.route('/verify/nas', methods=['POST'])
+@login_required
+def verify_nas_route():
+    payload = request.get_json(silent=True) or {}
+    nas_path = payload.get('nas_path', '').strip()
+    ok, msg = verify_nas_path(nas_path)
+    log_activity(f"Verify NAS path={nas_path}, success={ok}")
+    return jsonify(success=ok, message=msg)
+
+@app.route('/verify/s3', methods=['POST'])
+@login_required
+def verify_s3_route():
+    payload = request.get_json(silent=True) or {}
+    s3_path = payload.get('s3_path', '').strip()
+    vendor_id = payload.get('vendor_id')
+    cred = db.session.get(AwsCredential, int(vendor_id)) if vendor_id else None
+    if not cred:
+        return jsonify(success=False, message="Invalid vendor credential")
+    ok, msg = verify_s3_access(s3_path, cred.aws_profile)
+    log_activity(f"Verify S3 path={s3_path}, vendor={cred.vendor_name}, success={ok}")
+    return jsonify(success=ok, message=msg)
+
 @app.route('/execution', methods=['GET', 'POST'])
 @login_required
 def execution_page():
@@ -714,7 +961,9 @@ def execution_page():
             'studio': ('ST', '/var/www/html/batch-web/scripts/Studio-Staging-Advanced.sh'),
             'bollywood': ('SW', '/var/www/html/batch-web/scripts/SW-Bollywood-Advanced.sh'),
             'llh': ('LH', '/var/www/html/batch-web/scripts/LLH-Upload-Advanced.sh'),
-            's3': ('S3', '/var/www/html/batch-web/scripts/generic-s3.sh')
+            's3': ('S3', '/var/www/html/batch-web/scripts/generic-s3.sh'),
+            'universal_upload': ('UA', None),
+            'universal_download': ('UD', None),
         }
         prefix, script = mapping[panel]
         t_id = get_next_ticket_id(prefix)
@@ -729,11 +978,28 @@ def execution_page():
             src = request.form.get('src_path', '/mnt/CSS-LLH/LLH/Revised')
             dst = request.form.get('dst_path', 's3://amagicloud-samsungin/Media/S3/INSONO1/LL/Movies_Club_LLH')
             cmd = [script, t_id, b_no, request.form['aws'], request.form['rcp'], src, dst]
-            new_j = BatchJob(source_path=src, dest_path=dst)
+            new_j = BatchJob(source_path=src, dest_path=dst, aws_profile=request.form['aws'])
+        elif panel in ['universal_upload', 'universal_download']:
+            cred = db.session.get(AwsCredential, int(request.form['vendor_id']))
+            if not cred or not cred.is_active:
+                flash("Selected vendor credential is invalid or inactive", "danger")
+                return redirect(url_for('execution_page'))
+            nas_path = request.form['nas_path'].strip()
+            s3_path = request.form['s3_path'].strip()
+            nas_ok, nas_msg = verify_nas_path(nas_path)
+            s3_ok, s3_msg = verify_s3_access(s3_path, cred.aws_profile)
+            if not nas_ok or not s3_ok:
+                flash("Universal transfer verification failed. Check popup verification details before submit.", "danger")
+                log_activity(f"Universal verify failed ticket={t_id}, vendor={cred.vendor_name}, nas_ok={nas_ok}, s3_ok={s3_ok}")
+                return redirect(url_for('execution_page'))
+            b_no = "CUSTOM"
+            cmd = None
+            new_j = BatchJob(source_path=nas_path, dest_path=s3_path, vendor_name=cred.vendor_name, aws_profile=cred.aws_profile)
+            log_activity(f"Universal request: panel={panel}, ticket={t_id}, vendor={cred.vendor_name}, nas={nas_path}, s3={s3_path}")
         else:
             b_no = request.form['b_no']
             cmd = [script, t_id, b_no, request.form['aws'], request.form['rcp']]
-            new_j = BatchJob()
+            new_j = BatchJob(aws_profile=request.form['aws'])
 
         log_f = f"{JOB_LOG_DIR}/job_{t_id}.log"
         new_j.ticket_id = t_id
@@ -747,19 +1013,29 @@ def execution_page():
             dt = datetime.datetime.fromisoformat(sched_val)
             new_j.status, new_j.scheduled_time = 'Scheduled', dt
             db.session.add(new_j); db.session.commit()
-            scheduler.add_job(id=f"j_{new_j.id}", func=run_script_task, trigger='date', run_date=dt, args=[new_j.id, cmd, log_f])
+            if panel in ['universal_upload', 'universal_download']:
+                mode = 'upload' if panel == 'universal_upload' else 'download'
+                scheduler.add_job(id=f"j_{new_j.id}", func=run_universal_transfer_task, trigger='date', run_date=dt, args=[new_j.id, mode, new_j.source_path, new_j.dest_path, new_j.aws_profile, log_f])
+            else:
+                scheduler.add_job(id=f"j_{new_j.id}", func=run_script_task, trigger='date', run_date=dt, args=[new_j.id, cmd, log_f])
             flash(f"Job {t_id} scheduled for {sched_val}", "info")
             log_activity(f"Scheduled job {t_id}")
         else:
             new_j.status = 'Running'
             db.session.add(new_j); db.session.commit()
-            threading.Thread(target=run_script_task, args=(new_j.id, cmd, log_f)).start()
+            if panel in ['universal_upload', 'universal_download']:
+                mode = 'upload' if panel == 'universal_upload' else 'download'
+                threading.Thread(target=run_universal_transfer_task, args=(new_j.id, mode, new_j.source_path, new_j.dest_path, new_j.aws_profile, log_f)).start()
+            else:
+                threading.Thread(target=run_script_task, args=(new_j.id, cmd, log_f)).start()
             flash(f"Job {t_id} started immediately", "success")
             log_activity(f"Started job {t_id}")
         return redirect(url_for('dashboard'))
 
-    ids = {'ST': get_next_ticket_id('ST'), 'SW': get_next_ticket_id('SW'), 'LH': get_next_ticket_id('LH'), 'S3': get_next_ticket_id('S3')}
-    return render_page(EXECUTION_PAGE, ids=ids)
+    ids = {'ST': get_next_ticket_id('ST'), 'SW': get_next_ticket_id('SW'), 'LH': get_next_ticket_id('LH'), 'S3': get_next_ticket_id('S3'),
+           'UA': get_next_ticket_id('UA'), 'UD': get_next_ticket_id('UD')}
+    aws_credentials = AwsCredential.query.filter_by(is_active=True).order_by(AwsCredential.vendor_name).all()
+    return render_page(EXECUTION_PAGE, ids=ids, aws_credentials=aws_credentials)
 
 @app.route('/cancel-job/<int:j_id>')
 @login_required
@@ -816,14 +1092,18 @@ def reschedule_job_route():
             'studio': '/var/www/html/batch-web/scripts/Studio-Staging-Advanced.sh',
             'bollywood': '/var/www/html/batch-web/scripts/SW-Bollywood-Advanced.sh',
             'llh': '/var/www/html/batch-web/scripts/LLH-Upload-Advanced.sh',
-            's3': '/var/www/html/batch-web/scripts/generic-s3.sh'
+            's3': '/var/www/html/batch-web/scripts/generic-s3.sh',
         }
         script = mapping.get(job.batch_type, '/opt/generic-s3.sh')
         cmd = [script, job.ticket_id, job.batch_number, 'default', 'cdnupdate@shemaroo.com']
 
         job.status, job.scheduled_time = 'Scheduled', new_dt
         db.session.commit()
-        scheduler.add_job(id=f"j_{job.id}", func=run_script_task, trigger='date', run_date=new_dt, args=[job.id, cmd, job.log_file_path])
+        if job.batch_type in ['universal_upload', 'universal_download']:
+            mode = 'upload' if job.batch_type == 'universal_upload' else 'download'
+            scheduler.add_job(id=f"j_{job.id}", func=run_universal_transfer_task, trigger='date', run_date=new_dt, args=[job.id, mode, job.source_path, job.dest_path, job.aws_profile, job.log_file_path])
+        else:
+            scheduler.add_job(id=f"j_{job.id}", func=run_script_task, trigger='date', run_date=new_dt, args=[job.id, cmd, job.log_file_path])
         flash(f"Job {ticket_id} updated", "success")
         log_activity(f"Rescheduled job {ticket_id}")
     except Exception as e: flash(str(e), "danger")
@@ -930,8 +1210,12 @@ def check_and_migrate_db():
                 with db.engine.connect() as conn: conn.execute(text("ALTER TABLE batch_job ADD COLUMN source_path VARCHAR(300)")); conn.commit()
             if 'dest_path' not in cols:
                 with db.engine.connect() as conn: conn.execute(text("ALTER TABLE batch_job ADD COLUMN dest_path VARCHAR(300)")); conn.commit()
+            if 'vendor_name' not in cols:
+                with db.engine.connect() as conn: conn.execute(text("ALTER TABLE batch_job ADD COLUMN vendor_name VARCHAR(120)")); conn.commit()
+            if 'aws_profile' not in cols:
+                with db.engine.connect() as conn: conn.execute(text("ALTER TABLE batch_job ADD COLUMN aws_profile VARCHAR(120)")); conn.commit()
 
-        db.create_all() # Creates ArchiveData table if missing
+        db.create_all() # Creates ArchiveData/AwsCredential tables if missing
 
 if __name__ == '__main__':
     check_and_migrate_db()
