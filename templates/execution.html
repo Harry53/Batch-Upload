@@ -1,0 +1,105 @@
+
+{% extends "base.html" %}
+{% block content %}
+<div class="card mt-2"><div class="card-header bg-warning"><b>Job Reschedule</b></div><div class="card-body">
+<form method="post" action="{{ url_for('reschedule_job_route') }}"><div class="row g-2">
+    <div class="col-md-3">
+        <input name="ticket_id" class="form-control form-control-sm" placeholder="Ticket ID (e.g. ST-1001)" required>
+        <span class="help-text">Enter existing Scheduled/Failed ticket ID</span>
+    </div>
+    <div class="col-md-3"><select name="panel" class="form-select form-select-sm"><option value="studio">Studio-Stagging</option><option value="bollywood">SW-Bollywood</option><option value="llh">LLH-Upload</option><option value="s3">S3-Upload</option></select></div>
+    <div class="col-md-4"><input type="datetime-local" name="new_sched" class="form-control form-control-sm" required></div>
+    <div class="col-md-2"><button class="btn btn-dark btn-sm w-100">Update</button></div>
+</div></form></div></div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card"><div class="card-header"><b>Studio-Stagging Batch</b></div><div class="card-body">
+        <form method="post"><input type="hidden" name="panel" value="studio"><div class="row g-2">
+            <div class="col-6"><label>Ticket ID</label><input class="form-control" value="{{ ids.ST }}" readonly></div>
+            <div class="col-6"><label>Batch #</label><input name="b_no" class="form-control" required><span class="help-text">e.g. 1045, 1046</span></div>
+            <div class="col-6"><label>AWS Profile</label><input name="aws" class="form-control" value="default" readonly><span class="help-text">AWS CLI Profile name</span></div>
+            <div class="col-6"><label>Schedule</label><input type="datetime-local" name="sched" class="form-control"><span class="help-text">Leave blank to run now</span></div>
+            <div class="col-12"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com,haraprasad.mishra@shemaroo.com" required><span class="help-text">Comma separated emails</span></div>
+            <button class="btn btn-primary btn-sm mt-3 w-100">Run Studio Batch</button>
+        </div></form></div></div>
+
+        <div class="card"><div class="card-header"><b>LLH-Upload</b></div><div class="card-body">
+        <form method="post"><input type="hidden" name="panel" value="llh"><div class="row g-2">
+            <div class="col-6"><label>Ticket ID</label><input class="form-control" value="{{ ids.LH }}" readonly></div>
+            <div class="col-6"><label>Batch #</label><input name="b_no" class="form-control" required><span class="help-text">Unique Batch Number</span></div>
+            <div class="col-12"><label>Source Path</label>
+                <input name="src_path" class="form-control" value="/mnt/CSS-LLH" placeholder="/mnt/CSS-LLH">
+                <span class="help-text">NAS Share Path: \\192.168.0.150\syndicationmaster</span>
+            </div>
+            <div class="col-12"><label>Destination Path</label>
+                <input name="dst_path" class="form-control" value="s3://amagicloud-samsungin/Media/S3/INSONO1/LL/Movies_Club_LLH" placeholder="s3://amagicloud-samsungin/Media/S3/INSONO1/LL/Movies_Club_LLH">
+                <span class="help-text">Default: s3://amagicloud-samsungin/Media/S3/INSONO1/LL/Movies_Club_LLH</span>
+            </div>
+            <div class="col-6"><label>AWS Profile</label><input name="aws" class="form-control" value="amagicloud-samsung" readonly></div>
+            <div class="col-6"><label>Schedule</label><input type="datetime-local" name="sched" class="form-control"></div>
+            <div class="col-12"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com,haraprasad.mishra@shemaroo.com" required></div>
+            <button class="btn btn-info btn-sm mt-3 w-100 text-white">Run LLH Upload</button>
+        </div></form></div></div>
+    </div>
+
+    <div class="col-md-6">
+        <div class="card"><div class="card-header"><b>SW-Bollywood Batch</b></div><div class="card-body">
+        <form method="post"><input type="hidden" name="panel" value="bollywood"><div class="row g-2">
+            <div class="col-6"><label>Ticket ID</label><input class="form-control" value="{{ ids.SW }}" readonly></div>
+            <div class="col-6"><label>Batch #</label><input name="b_no" class="form-control" required><span class="help-text">e.g. 501, 502</span></div>
+            <div class="col-6"><label>AWS Profile</label><input name="aws" class="form-control" value="default"></div>
+            <div class="col-6"><label>Schedule</label><input type="datetime-local" name="sched" class="form-control"></div>
+            <div class="col-12"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com,haraprasad.mishra@shemaroo.com" required></div>
+            <button class="btn btn-secondary btn-sm mt-3 w-100">Run Bollywood Batch</button>
+        </div></form></div></div>
+        <div class="card"><div class="card-header"><b>S3 Upload (Generic)</b></div><div class="card-body">
+        <form method="post"><input type="hidden" name="panel" value="s3"><div class="row g-2">
+            <div class="col-6"><label>Ticket ID</label><input class="form-control" value="{{ ids.S3 }}" readonly></div>
+            <div class="col-6"><label>AWS Profile</label><input name="aws" class="form-control" value="default"></div>
+            <div class="col-12"><label>Source Path</label><input name="src" class="form-control" required><span class="help-text">Local server path</span></div>
+            <div class="col-12"><label>Destination Path</label><input name="dst" class="form-control" required><span class="help-text">S3 URI (s3://bucket/path)</span></div>
+            <div class="col-6"><label>Schedule</label><input type="datetime-local" name="sched" class="form-control"></div>
+            <div class="col-6"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com,haraprasad.mishra@shemaroo.com" required></div>
+            <button class="btn btn-dark btn-sm mt-3 w-100">Run Upload</button>
+        </div></form></div></div>
+        <div class="card"><div class="card-header"><b>Universal Upload (NAS ➜ S3)</b></div><div class="card-body">
+        <form method="post"><input type="hidden" name="panel" value="universal_upload"><div class="row g-2">
+            <div class="col-6"><label>Ticket ID</label><input class="form-control" value="{{ ids.UA }}" readonly></div>
+            <div class="col-6"><label>Vendor</label><select name="vendor_id" class="form-select" required>{% for v in aws_credentials %}<option value="{{ v.id }}">{{ v.vendor_name }} ({{ v.aws_profile }})</option>{% endfor %}</select></div>
+            <div class="col-9"><label>NAS Source (UNC)</label><input name="nas_path" class="form-control" placeholder="\\192.168.0.150\Syndication-Master\Apr-2026" required></div>
+            <div class="col-3 d-flex align-items-end"><button type="button" class="btn btn-outline-info btn-sm w-100" onclick="verifyNas(this.form.nas_path.value)">Verify Source</button></div>
+            <div class="col-9"><label>S3 Destination</label><input name="s3_path" class="form-control" placeholder="s3://insget-world/Apr-2027" required></div>
+            <div class="col-3 d-flex align-items-end"><button type="button" class="btn btn-outline-info btn-sm w-100" onclick="verifyS3(this.form.s3_path.value, this.form.vendor_id.value)">Verify Dest</button></div>
+            <div class="col-6"><label>Schedule</label><input type="datetime-local" name="sched" class="form-control"></div>
+            <div class="col-6"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com" required></div>
+            <button class="btn btn-primary btn-sm mt-3 w-100">Run Universal Upload</button>
+        </div></form></div></div>
+
+        <div class="card"><div class="card-header"><b>Universal Download (S3 ➜ NAS)</b></div><div class="card-body">
+        <form method="post"><input type="hidden" name="panel" value="universal_download"><div class="row g-2">
+            <div class="col-6"><label>Ticket ID</label><input class="form-control" value="{{ ids.UD }}" readonly></div>
+            <div class="col-6"><label>Vendor</label><select name="vendor_id" class="form-select" required>{% for v in aws_credentials %}<option value="{{ v.id }}">{{ v.vendor_name }} ({{ v.aws_profile }})</option>{% endfor %}</select></div>
+            <div class="col-9"><label>S3 Source</label><input name="s3_path" class="form-control" placeholder="s3://insget-world/Apr-2027" required></div>
+            <div class="col-3 d-flex align-items-end"><button type="button" class="btn btn-outline-info btn-sm w-100" onclick="verifyS3(this.form.s3_path.value, this.form.vendor_id.value)">Verify Source</button></div>
+            <div class="col-9"><label>NAS Destination (UNC)</label><input name="nas_path" class="form-control" placeholder="\\192.168.0.150\Syndication-Master\Apr-2026" required></div>
+            <div class="col-3 d-flex align-items-end"><button type="button" class="btn btn-outline-info btn-sm w-100" onclick="verifyNas(this.form.nas_path.value)">Verify Dest</button></div>
+            <div class="col-6"><label>Schedule</label><input type="datetime-local" name="sched" class="form-control"></div>
+            <div class="col-6"><label>Recipients</label><input name="rcp" class="form-control" value="cdnupdate@shemaroo.com" required></div>
+            <button class="btn btn-warning btn-sm mt-3 w-100">Run Universal Download</button>
+        </div></form></div></div>
+    </div>
+</div>
+<script>
+async function verifyNas(path) {
+    const r = await fetch("{{ url_for('verify_nas_route') }}", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({nas_path: path})});
+    const d = await r.json();
+    alert((d.success ? "SUCCESS\n" : "FAILED\n") + d.message);
+}
+async function verifyS3(path, vendorId) {
+    const r = await fetch("{{ url_for('verify_s3_route') }}", {method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({s3_path: path, vendor_id: vendorId})});
+    const d = await r.json();
+    alert((d.success ? "SUCCESS\n" : "FAILED\n") + d.message);
+}
+</script>
+{% endblock %}
