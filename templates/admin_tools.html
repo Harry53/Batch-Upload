@@ -1,0 +1,122 @@
+
+{% extends "base.html" %}
+{% block content %}
+<div class="row">
+    <div class="col-md-12 mb-3"><div class="card border-info"><div class="card-header bg-info text-white"><b>AWS Credential List</b></div><div class="card-body">
+    <form method="post" class="row g-2 mb-3">
+        <input type="hidden" name="cred_action" value="create">
+        <div class="col-md-2"><input name="vendor_name" class="form-control form-control-sm" placeholder="Vendor Name" required></div>
+        <div class="col-md-2"><input name="aws_profile" class="form-control form-control-sm" placeholder="AWS Profile" required></div>
+        <div class="col-md-2"><input name="access_key" class="form-control form-control-sm" placeholder="Access Key"></div>
+        <div class="col-md-2"><input name="secret_key" class="form-control form-control-sm" placeholder="Secret Key"></div>
+        <div class="col-md-2"><input name="region" class="form-control form-control-sm" placeholder="Region"></div>
+        <div class="col-md-1"><input name="notes" class="form-control form-control-sm" placeholder="Notes"></div>
+        <div class="col-md-1"><button class="btn btn-sm btn-primary w-100">Add</button></div>
+    </form>
+    <div class="table-responsive-scroll" style="max-height:220px;">
+        <table class="table table-sm"><thead><tr><th>Vendor</th><th>Profile</th><th>Access Key</th><th>Secret Key</th><th>Region</th><th>Notes</th><th>Active</th><th>Actions</th></tr></thead>
+        <tbody>{% for cred in aws_credentials %}<tr>
+            <form method="post">
+                <input type="hidden" name="cred_action" value="update">
+                <input type="hidden" name="cred_id" value="{{ cred.id }}">
+                <td><input name="vendor_name" class="form-control form-control-sm" value="{{ cred.vendor_name }}"></td>
+                <td><input name="aws_profile" class="form-control form-control-sm" value="{{ cred.aws_profile }}"></td>
+                <td><input name="access_key" class="form-control form-control-sm" value="{{ cred.access_key or '' }}"></td>
+                <td><input name="secret_key" class="form-control form-control-sm" value="{{ cred.secret_key or '' }}"></td>
+                <td><input name="region" class="form-control form-control-sm" value="{{ cred.region or '' }}"></td>
+                <td><input name="notes" class="form-control form-control-sm" value="{{ cred.notes or '' }}"></td>
+                <td><input type="checkbox" name="is_active" {{ 'checked' if cred.is_active }}></td>
+                <td><button class="btn btn-xs btn-success">Save</button></td>
+            </form>
+        </tr>{% endfor %}</tbody></table>
+    </div>
+    </div></div></div>
+    <div class="col-md-12 mb-3"><div class="card border-primary"><div class="card-header bg-primary text-white"><b>Data Archival</b></div><div class="card-body">
+    <form method="post" action="{{ url_for('archive_data_route') }}" class="row align-items-center">
+        <div class="col-md-2"><label>Archive Period:</label></div>
+        <div class="col-md-3">
+            <select name="period" class="form-select" onchange="this.value=='custom'?document.getElementById('custom_range').style.display='flex':document.getElementById('custom_range').style.display='none'">
+                <option value="1m">Older than 1 Month</option>
+                <option value="3m">Older than 3 Months</option>
+                <option value="6m">Older than 6 Months</option>
+                <option value="1y">Older than 1 Year</option>
+                <option value="custom">Custom Date Range</option>
+            </select>
+        </div>
+        <div class="col-md-5" id="custom_range" style="display:none; gap:5px;">
+            <input type="date" name="custom_start" class="form-control"> to <input type="date" name="custom_end" class="form-control">
+        </div>
+        <div class="col-md-2"><button class="btn btn-outline-primary w-100" onclick="return confirm('This will MOVE data and log files to archive. Continue?')">Start Archive</button></div>
+    </form>
+    </div></div></div>
+
+    <div class="col-md-8"><div class="card"><div class="card-header bg-dark text-white"><b>Audit & Path Validation</b></div><div class="card-body">
+    <form method="post" class="row g-2 mb-3">
+        <input type="hidden" name="audit_action" value="1">
+        <div class="col-auto"><input name="check_batch" class="form-control" placeholder="Batch Number" required></div>
+        <div class="col-auto"><select name="audit_type" class="form-select">
+            <option value="studio">Studio-Stagging</option><option value="bollywood">SW-Bollywood</option><option value="llh">LLH-Upload</option>
+        </select></div><div class="col-auto"><button class="btn btn-dark">Validate Paths</button></div>
+    </form>
+    <form method="post" class="row g-2 mt-3">
+        <input type="hidden" name="s3_link_action" value="1">
+        <div class="col-auto"><input name="s3_batch" class="form-control" placeholder="Batch Number" required></div>
+        <div class="col-auto"><select name="s3_type" class="form-select">
+            <option value="studio">Studio-Stagging</option><option value="bollywood">SW-Bollywood</option><option value="llh">LLH-Upload</option>
+        </select></div><div class="col-auto"><button class="btn btn-success">S3 Link Creation</button></div>
+    </form>
+    {% if s3_links %}<div class="mt-3"><h6>S3 Links Generated:</h6><pre class="bg-light p-2 small border" style="max-height:120px; overflow:auto;">{{ s3_links }}</pre></div>{% endif %}
+    {% if audit_s3 or audit_nas %}<div class="row"><div class="col-md-6"><h6>S3 Listing</h6><pre class="bg-light p-2 small border" style="height:120px; overflow:auto;">{{ audit_s3 }}</pre></div>
+    <div class="col-md-6"><h6>NAS Listing</h6><pre class="bg-light p-2 small border" style="height:120px; overflow:auto;">{{ audit_nas }}</pre></div></div>{% endif %}
+    </div></div></div>
+
+    <div class="col-md-4"><div class="card"><div class="card-header bg-secondary text-white"><b>Database Backup</b></div><div class="card-body">
+    <form method="post" action="{{ url_for('backup_db') }}"><button class="btn btn-success w-100">Create Backup</button></form>
+    {% if backup_file %}<div class="mt-2 p-2 bg-light small">Latest: {{ backup_file }}</div>{% endif %}
+    <hr>
+    <form method="post" enctype="multipart/form-data" action="{{ url_for('restore_db') }}">
+        <input type="file" name="db_file" class="form-control form-control-sm" accept=".db">
+        <button class="btn btn-warning btn-sm w-100 mt-2">Restore DB</button>
+    </form></div></div></div>
+</div>
+
+<div class="card"><div class="card-header d-flex justify-content-between align-items-center">
+    <b>Job History</b>
+    <form class="d-flex gap-2">
+        <input type="date" name="start_date" class="form-control form-control-sm" value="{{ request.args.get('start_date', '') }}">
+        <input type="date" name="end_date" class="form-control form-control-sm" value="{{ request.args.get('end_date', '') }}">
+        <button class="btn btn-sm btn-primary">Filter</button>
+    </form>
+</div>
+<div class="card-body p-0 table-responsive-scroll">
+<table class="table table-sm mb-0"><thead><tr><th>Ticket</th><th>Batch #</th><th>Type</th><th>Status</th><th>Start</th><th>Schedule</th><th>Completion</th><th>Action</th><th>Log</th></tr></thead>
+<tbody>{% for h in history %}<tr>
+    <td>{{ h.ticket_id }}</td><td>{{ h.batch_number }}</td><td>{{ h.batch_type }}</td>
+    <td><span class="badge {{ 'bg-success' if h.status=='Completed' else 'bg-danger' if h.status=='Failed' else 'bg-warning' if h.status=='Scheduled' else 'bg-secondary' }}">{{ h.status }}</span></td>
+    <td>{{ h.start_time.strftime('%Y-%m-%d %H:%M') if h.start_time else '-' }}</td>
+    <td>{{ h.scheduled_time.strftime('%Y-%m-%d %H:%M') if h.scheduled_time else '-' }}</td>
+    <td>{{ h.completion_time.strftime('%Y-%m-%d %H:%M') if h.completion_time else '-' }}</td>
+    <td>{% if h.status in ['Running', 'Scheduled'] %}<a href="{{ url_for('cancel_job', j_id=h.id) }}" class="btn btn-xs btn-danger">Cancel</a>{% else %}-{% endif %}</td>
+    <td><a href="{{ url_for('view_job_log', j_id=h.id) }}" target="_blank" class="btn btn-xs btn-outline-primary">Log</a></td>
+</tr>{% endfor %}</tbody>
+</table></div></div>
+
+<div class="card"><div class="card-header d-flex justify-content-between align-items-center">
+    <b>User Activity Log</b>
+    <form class="d-flex gap-2" action="{{ url_for('admin_tools') }}">
+        <input type="date" name="act_start" class="form-control form-control-sm" value="{{ request.args.get('act_start', '') }}">
+        <input type="date" name="act_end" class="form-control form-control-sm" value="{{ request.args.get('act_end', '') }}">
+        <button class="btn btn-sm btn-info text-white">Filter Log</button>
+    </form>
+</div>
+<div class="card-body p-0 table-responsive-scroll"><table class="table table-sm mb-0"><thead class="table-light"><tr><th>User</th><th>Action</th><th>Time</th></tr></thead>
+<tbody>{% for a in activities %}<tr><td>{{ a.username }}</td><td>{{ a.action }}</td>
+<td>{{ a.timestamp.strftime('%Y-%m-%d %H:%M:%S') }}</td></tr>{% endfor %}</tbody></table></div></div>
+
+<div class="card"><div class="card-header"><b>Web Log (Latest 200 lines)</b>
+    <small class="text-muted d-block">Path: /var/www/html/batch-web/logs/web.log</small>
+</div>
+<div class="card-body">
+    <pre class="bg-light p-2 small border" style="max-height:260px; overflow:auto; white-space:pre-wrap;">{{ web_log_tail }}</pre>
+</div></div>
+{% endblock %}
