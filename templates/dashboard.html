@@ -1,0 +1,41 @@
+
+{% extends "base.html" %}
+{% block content %}
+<div class="row">
+    <div class="col-md-9"><div class="card"><div class="card-body"><h6>Job Status Trends (Last 7 Days)</h6><canvas id="jobChart" height="90"></canvas></div></div></div>
+    <div class="col-md-3">
+        <div class="card bg-success text-white mb-2"><div class="card-body py-2"><span>Completed</span><h3>{{ comp_count }}</h3></div></div>
+        <div class="card bg-danger text-white mb-2"><div class="card-body py-2"><span>Failed</span><h3>{{ fail_count }}</h3></div></div>
+        <div class="card bg-warning text-white mb-2"><div class="card-body py-2"><span>Scheduled</span><h3>{{ sched_count }}</h3></div></div>
+        <div class="card bg-primary text-white mb-2"><div class="card-body py-2"><span>Active Users</span><h3>{{ active_users }}</h3></div></div>
+    </div>
+</div>
+<div class="card"><div class="card-header bg-white"><b>Recent Job History</b></div>
+<div class="card-body p-0 table-responsive-scroll"><table class="table table-sm mb-0">
+    <thead class="table-light"><tr><th>Ticket</th><th>Type</th><th>Batch #</th><th>Status</th><th>Start</th><th>Schedule</th><th>End</th><th>Action</th><th>Log</th></tr></thead>
+    <tbody>{% for j in history %}<tr><td>{{ j.ticket_id }}</td><td>{{ j.batch_type }}</td><td>{{ j.batch_number }}</td>
+    <td><span class="badge {{ 'bg-success' if j.status=='Completed' else 'bg-danger' if j.status=='Failed' else 'bg-warning' if j.status=='Scheduled' else 'bg-secondary' }}">{{ j.status }}</span></td>
+    <td>{{ j.start_time.strftime('%d-%m-%Y %H:%M') if j.start_time else '-' }}</td>
+    <td>{{ j.scheduled_time.strftime('%d-%m-%Y %H:%M') if j.scheduled_time else '-' }}</td>
+	<td>{{ j.completion_time.strftime('%d-%m-%Y %H:%M') if j.completion_time else '-' }}</td>
+    <td>
+        {% if j.status in ['Running', 'Scheduled'] %}
+        <a href="{{ url_for('cancel_job', j_id=j.id) }}" class="btn btn-xs btn-danger" onclick="return confirm('Are you sure you want to cancel this job?')">Cancel</a>
+        {% else %}-{% endif %}
+    </td>
+    <td><a href="{{ url_for('view_job_log', j_id=j.id) }}" target="_blank" class="btn btn-xs btn-outline-primary">View</a></td>
+    </tr>{% endfor %}</tbody>
+</table></div></div>
+<script>
+new Chart(document.getElementById('jobChart'), {
+    type: 'line',
+    data: {
+        labels: {{ labels|safe }},
+        datasets: [
+            { label: 'Completed', data: {{ data_comp|safe }}, borderColor: '#27ae60', backgroundColor: 'rgba(39, 174, 96, 0.1)', fill: true, tension: 0.3 },
+            { label: 'Failed', data: {{ data_fail|safe }}, borderColor: '#e74c3c', backgroundColor: 'rgba(231, 76, 60, 0.1)', fill: true, tension: 0.3 }
+        ]
+    }, options: { scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } } }
+});
+</script>
+{% endblock %}
