@@ -18,6 +18,14 @@ from .tasks import run_script_task, run_universal_transfer_task
 
 
 def register_routes(app):
+    @app.route('/')
+    def index():
+        return redirect(url_for('dashboard'))
+
+    @app.route('/favicon.ico')
+    def favicon():
+        return '', 204
+
     @app.route('/log-click', methods=['POST'])
     @login_required
     def log_click_event():
@@ -92,6 +100,7 @@ def register_routes(app):
                            sched_count=BatchJob.query.filter_by(status='Scheduled').count(),
                            labels=labels, data_comp=data_comp, data_fail=data_fail)
 
+    @app.route('/admin', methods=['GET', 'POST'])
     @app.route('/admin-tools', methods=['GET', 'POST'])
     @login_required
     @role_required(['Admin'])
@@ -269,6 +278,7 @@ def register_routes(app):
         log_activity(f"Verify S3 path={s3_path}, vendor={cred.vendor_name}, success={ok}")
         return jsonify(success=ok, message=msg)
 
+    @app.route('/execute', methods=['GET', 'POST'])
     @app.route('/execution', methods=['GET', 'POST'])
     @login_required
     def execution_page():
@@ -460,6 +470,7 @@ def register_routes(app):
             with open(job.log_file_path, 'r') as f: return f"<pre>{f.read()}</pre>"
         return "Log file not found."
 
+    @app.route('/users')
     @app.route('/user-mgmt')
     @login_required
     @role_required(['Admin'])

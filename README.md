@@ -39,6 +39,15 @@ Batch-Upload/
 - SQLite auto-migration for newly introduced columns and tables.
 - Web/activity logging under the configured batch web log directory.
 
+## Web Routes
+
+- `/` redirects to the dashboard (or login when unauthenticated).
+- `/login` opens the login page.
+- `/dashboard` opens the main dashboard.
+- `/execution` and `/execute` open the execution page.
+- `/admin-tools` and `/admin` open Admin Tools for Admin users.
+- `/user-mgmt` and `/users` open User Management for Admin users.
+
 ## Runtime Requirements
 
 - Python 3.10+ recommended.
